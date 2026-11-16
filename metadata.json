@@ -1,0 +1,6 @@
+{
+  "name": "SafarLedger ERP",
+  "description": "Sistem ERP Multi-Tenant SaaS untuk Biro Travel Haji & Umrah dengan akuntansi SAK ETAP, manajemen kloter, rooming list, DMS paspor, inventaris perlengkapan, komisi agen berjenjang, dan log SLA ISO 9001:2015.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
