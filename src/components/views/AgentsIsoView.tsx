@@ -58,7 +58,7 @@ export const AgentsIsoView: React.FC<AgentsIsoViewProps> = ({
     kloterCode: departures[0]?.kloterCode || '',
     category: 'AKOMODASI' as IncidentCategory,
     description: '',
-    slaDeadline: '2026-11-25',
+    slaDeadline: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
   });
 
   const handleSubmitAgent = (e: React.FormEvent) => {

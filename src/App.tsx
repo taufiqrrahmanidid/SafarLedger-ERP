@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { LoginView } from './components/LoginView';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { AccountingView } from './components/views/AccountingView';
@@ -9,20 +10,14 @@ import { DmsView } from './components/views/DmsView';
 import { InventoryView } from './components/views/InventoryView';
 import { PaymentsView } from './components/views/PaymentsView';
 import { SuperAdminView } from './components/views/SuperAdminView';
+import { STANDARD_TRAVEL_COA } from './data/seedData';
+import { api, apiRequest } from './services/api';
+import { TenantUsersView } from './components/views/TenantUsersView';
 import {
-  INITIAL_TENANTS,
-  INITIAL_WORKSPACE_DATA,
-  STANDARD_TRAVEL_COA,
-} from './data/seedData';
-import {
-  Agent,
-  Booking,
-  Departure,
   DmsRecord,
   ErpTab,
   IncidentCategory,
   IsoIncident,
-  JournalEntry,
   PackageCategory,
   PaymentMethod,
   PaymentRecord,
@@ -30,82 +25,72 @@ import {
   RoomType,
   Tenant,
   TenantWorkspaceData,
-  TravelPackage,
+  SystemUser,
   UserRole,
 } from './types/erp';
 import {
   formatIDR,
   isPassportExpiringBeforeDeparture,
-  maskNik,
 } from './utils/formatters';
 
-const STORAGE_KEY = 'safarledger_erp_v2';
-
-interface PersistedState {
-  tenants: Tenant[];
-  workspaces: Record<string, TenantWorkspaceData>;
-}
-
-function loadInitialState(): PersistedState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as PersistedState;
-      if (parsed.tenants?.length && parsed.workspaces) {
-        return parsed;
-      }
-    }
-  } catch {
-    // Fallback to seed data
-  }
-  return {
-    tenants: INITIAL_TENANTS,
-    workspaces: INITIAL_WORKSPACE_DATA,
+interface WorkspaceApiResponse {
+  user: {
+    id: string;
+    email: string;
+    role: UserRole;
   };
+  tenant: Tenant;
+  tenants?: Tenant[];
+  workspace: TenantWorkspaceData;
 }
+
+const EMPTY_WORKSPACE: TenantWorkspaceData = {
+  packages: [],
+  departures: [],
+  bookings: [],
+  payments: [],
+  coa: STANDARD_TRAVEL_COA.map((acc) => ({ ...acc, openingBalance: 0 })),
+  journals: [],
+  dmsRecords: [],
+  inventory: [],
+  agents: [],
+  isoIncidents: [],
+};
+
+const ALLOWED_TABS_BY_ROLE: Record<UserRole, ErpTab[]> = {
+  SUPER_ADMIN: ['dashboard', 'bookings', 'dms', 'payments', 'accounting', 'inventory', 'agents', 'superadmin'],
+  OWNER: ['dashboard', 'bookings', 'dms', 'payments', 'accounting', 'inventory', 'agents', 'users'],
+  OPS: ['bookings', 'dms', 'payments', 'inventory', 'agents'],
+  FINANCE: ['payments', 'accounting', 'agents'],
+  AGENT: ['bookings', 'agents'],
+};
+
+const DEFAULT_TAB_BY_ROLE: Record<UserRole, ErpTab> = {
+  SUPER_ADMIN: 'dashboard',
+  OWNER: 'dashboard',
+  OPS: 'bookings',
+  FINANCE: 'payments',
+  AGENT: 'bookings',
+};
 
 export default function App() {
-  const [state, setState] = useState<PersistedState>(() => loadInitialState());
-  const [selectedTenantId, setSelectedTenantId] = useState<string>(
-    () => state.tenants[0]?.id || 't1'
-  );
+  const [loading, setLoading] = useState(true);
+  const [authRequired, setAuthRequired] = useState(false);
+
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [activeTenant, setActiveTenant] = useState<Tenant | null>(null);
+  const [workspace, setWorkspace] = useState<TenantWorkspaceData>(EMPTY_WORKSPACE);
+
   const [activeRole, setActiveRole] = useState<UserRole>('OWNER');
   const [currentTab, setCurrentTab] = useState<ErpTab>('dashboard');
   const [feedbackBanner, setFeedbackBanner] = useState<string | null>(null);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [state]);
+  const [currentUserId, setCurrentUserId] = useState<string>('');
+  const [users, setUsers] = useState<SystemUser[]>([]);
 
-  const activeTenant = useMemo(
-    () => state.tenants.find((t) => t.id === selectedTenantId) || state.tenants[0],
-    [state.tenants, selectedTenantId]
-  );
+  const dmsDebounceRef = useRef<Record<string, number>>({});
 
-  const workspace: TenantWorkspaceData = useMemo(
-    () =>
-      state.workspaces[activeTenant.id] || {
-        packages: [],
-        departures: [],
-        bookings: [],
-        payments: [],
-        coa: STANDARD_TRAVEL_COA,
-        journals: [],
-        dmsRecords: [],
-        inventory: [],
-        agents: [],
-        isoIncidents: [],
-      },
-    [state.workspaces, activeTenant.id]
-  );
-
-  useEffect(() => {
-    document.documentElement.style.setProperty('--brand-primary', activeTenant.primaryColor);
-  }, [activeTenant.primaryColor]);
+  const [tenantUsers, setTenantUsers] = useState<SystemUser[]>([]);
 
   const showFeedback = (message: string) => {
     setFeedbackBanner(message);
@@ -117,18 +102,75 @@ export default function App() {
   const updateActiveWorkspace = (
     updater: (prev: TenantWorkspaceData) => TenantWorkspaceData
   ) => {
-    setState((prev) => {
-      const current = prev.workspaces[activeTenant.id];
-      if (!current) return prev;
-      return {
-        ...prev,
-        workspaces: {
-          ...prev.workspaces,
-          [activeTenant.id]: updater(current),
-        },
-      };
-    });
+    setWorkspace((prev) => updater(prev));
   };
+
+  const fetchWorkspace = async () => {
+    try {
+      const data = await apiRequest<WorkspaceApiResponse>('/api/workspace');
+      setActiveTenant(data.tenant);
+      setTenants((prev) => {
+        const exists = prev.some((t) => t.id === data.tenant.id);
+        return exists
+          ? prev.map((t) => (t.id === data.tenant.id ? data.tenant : t))
+          : [data.tenant, ...prev];
+      });
+      setCurrentUserId(data.user.id);
+      setActiveRole(data.user.role);
+      setActiveTenant(data.tenant);
+      setTenants(data.tenants && data.tenants.length > 0 ? data.tenants : [data.tenant]);
+      setWorkspace(data.workspace);
+
+      if (data.user.role === 'SUPER_ADMIN') {
+        try {
+          const allUsers = await api.listUsers();
+          setUsers(allUsers);
+        } catch {
+          // Abaikan
+        }
+        setTenantUsers([]);
+      } else if (data.user.role === 'OWNER') {
+        setUsers([]);
+        try {
+          const staffUsers = await api.listTenantUsers();
+          setTenantUsers(staffUsers);
+        } catch {
+          // Abaikan
+        }
+      } else {
+        setUsers([]);
+        setTenantUsers([]);
+      }
+      setActiveRole(data.user.role);
+      setCurrentTab((prev) =>
+        ALLOWED_TABS_BY_ROLE[data.user.role].includes(prev)
+          ? prev
+          : DEFAULT_TAB_BY_ROLE[data.user.role]
+      );
+      setAuthRequired(false);
+    } catch (err: any) {
+      if (err.message === 'UNAUTHORIZED') {
+        setAuthRequired(true);
+      } else {
+        showFeedback(`Gagal memuat data server: ${err.message}`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchWorkspace();
+  }, []);
+
+  useEffect(() => {
+    if (activeTenant?.primaryColor) {
+      document.documentElement.style.setProperty(
+        '--brand-primary',
+        activeTenant.primaryColor
+      );
+    }
+  }, [activeTenant?.primaryColor]);
 
   // Alert counters
   const expiredPassportCount = useMemo(
@@ -149,126 +191,19 @@ export default function App() {
     [workspace.inventory]
   );
 
-  const todayIso = '2026-11-15';
+  const allowedTabs = ALLOWED_TABS_BY_ROLE[activeRole];
 
-  // Role-based automatic tab fallback if user switches to a restricted role
-  const handleChangeRole = (role: UserRole) => {
-    setActiveRole(role);
-    if (role === 'FINANCE' && (currentTab === 'dms' || currentTab === 'inventory' || currentTab === 'superadmin')) {
-      setCurrentTab('accounting');
-    } else if (role === 'AGENT' && currentTab !== 'dashboard' && currentTab !== 'bookings' && currentTab !== 'agents') {
-      setCurrentTab('agents');
-    } else if (role === 'SUPER_ADMIN') {
-      setCurrentTab('superadmin');
+  const handleNavigateTab = (tab: ErpTab) => {
+    if (allowedTabs.includes(tab)) {
+      setCurrentTab(tab);
     }
   };
 
-  // 1. Create Departure (Kloter)
-  const handleCreateDeparture = (input: {
-    packageId: string;
-    kloterCode: string;
-    airline: string;
-    departureDate: string;
-    returnDate: string;
-    totalSeats: number;
-  }) => {
-    const pkg = workspace.packages.find((p) => p.id === input.packageId);
-    if (!pkg) return;
+  // ==========================================================
+  // HANDLER TERHUBUNG KE POSTGRESQL (server.ts)
+  // ==========================================================
 
-    const newDep: Departure = {
-      id: `d-${Date.now()}`,
-      tenantId: activeTenant.id,
-      packageId: pkg.id,
-      kloterCode: input.kloterCode.toUpperCase(),
-      packageName: pkg.name,
-      airline: input.airline,
-      departureDate: input.departureDate,
-      returnDate: input.returnDate,
-      totalSeats: input.totalSeats,
-      filledSeats: 0,
-      estHppPerSeat: pkg.hppEstimate,
-      status: 'OPEN',
-    };
-
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      departures: [newDep, ...prev.departures],
-    }));
-    showFeedback(`Kloter ${newDep.kloterCode} berhasil dibuka dengan kuota ${newDep.totalSeats} seat.`);
-  };
-
-  // 2. Dispatch Departure (SAK ETAP Revenue Recognition)
-  const handleDispatchDeparture = (departureId: string) => {
-    const dep = workspace.departures.find((d) => d.id === departureId);
-    if (!dep || dep.status === 'DEPARTED') return;
-
-    const kloterBookings = workspace.bookings.filter((b) => b.departureId === departureId);
-    const recognizedAmount = kloterBookings.reduce((sum, b) => sum + b.paidAmount, 0);
-    const totalHpp = dep.filledSeats * dep.estHppPerSeat;
-
-    const journalLines = [];
-    if (recognizedAmount > 0) {
-      journalLines.push(
-        {
-          accountCode: '2-101',
-          accountName: 'Uang Muka Jamaah (Liabilitas)',
-          debit: recognizedAmount,
-          credit: 0,
-        },
-        {
-          accountCode: '4-101',
-          accountName: 'Pendapatan Paket Umrah & Haji',
-          debit: 0,
-          credit: recognizedAmount,
-        }
-      );
-    }
-    if (totalHpp > 0) {
-      journalLines.push(
-        {
-          accountCode: '5-101',
-          accountName: 'Beban Pokok Penjualan (Tiket, Hotel, Visa)',
-          debit: totalHpp,
-          credit: 0,
-        },
-        {
-          accountCode: '1-102',
-          accountName: 'Bank Operasional Syariah (BSI)',
-          debit: 0,
-          credit: totalHpp,
-        }
-      );
-    }
-
-    const newJournal: JournalEntry | null =
-      journalLines.length > 0
-        ? {
-            id: `j-${Date.now()}`,
-            tenantId: activeTenant.id,
-            entryNo: `REV-${dep.kloterCode}`,
-            date: dep.departureDate,
-            refType: 'DEPARTURE_RECOGNITION',
-            kloterCode: dep.kloterCode,
-            description: `Pengakuan Pendapatan & HPP Kloter ${dep.kloterCode} (${dep.filledSeats} Jamaah Berangkat)`,
-            lines: journalLines,
-          }
-        : null;
-
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      departures: prev.departures.map((d) =>
-        d.id === departureId ? { ...d, status: 'DEPARTED' } : d
-      ),
-      journals: newJournal ? [newJournal, ...prev.journals] : prev.journals,
-    }));
-
-    showFeedback(
-      `Kloter ${dep.kloterCode} diberangkatkan. Pendapatan ${formatIDR(recognizedAmount)} diakui sesuai SAK ETAP.`
-    );
-  };
-
-  // 3. Create Booking + DMS + Agency Commission Accrual
-  const handleCreateBooking = (input: {
+  const handleCreateBooking = async (input: {
     jamaahName: string;
     nikRaw: string;
     phone: string;
@@ -280,136 +215,92 @@ export default function App() {
     passportNo: string;
     passportExpiry: string;
   }) => {
-    const dep = workspace.departures.find((d) => d.id === input.departureId);
-    const pkg = workspace.packages.find((p) => p.id === dep?.packageId);
-    if (!dep || !pkg) return;
-
-    const totalAmount =
-      input.roomType === 'DOUBLE'
-        ? pkg.priceDouble
-        : input.roomType === 'TRIPLE'
-        ? pkg.priceTriple
-        : pkg.priceQuad;
-
-    const bookingId = `b-${Date.now()}`;
-    const bookingNo = `BK-2611-${String(workspace.bookings.length + 1).padStart(3, '0')}`;
-
-    const newBooking: Booking = {
-      id: bookingId,
-      tenantId: activeTenant.id,
-      bookingNo,
-      departureId: dep.id,
-      kloterCode: dep.kloterCode,
-      jamaahName: input.jamaahName.trim(),
-      nikMasked: maskNik(input.nikRaw),
-      phone: input.phone,
-      gender: input.gender,
-      roomType: input.roomType,
-      roomNumber: 'TBD',
-      mahramGroup: input.mahramGroup.trim(),
-      agentId: input.agentId || undefined,
-      totalAmount,
-      paidAmount: 0,
-      status: 'PENDING_DP',
-      kitDispatched: false,
-      createdAt: todayIso,
-    };
-
-    const newDms: DmsRecord = {
-      id: `dm-${Date.now()}`,
-      tenantId: activeTenant.id,
-      bookingId,
-      jamaahName: newBooking.jamaahName,
-      kloterCode: dep.kloterCode,
-      departureDate: dep.departureDate,
-      ktpStatus: 'REVIEW',
-      kkStatus: 'REVIEW',
-      passportNo: input.passportNo || '-',
-      passportExpiry: input.passportNo ? input.passportExpiry : '',
-      passportStatus: input.passportNo ? 'REVIEW' : 'MISSING',
-      meningitisStatus: 'MISSING',
-      mahramDocStatus: input.mahramGroup ? 'REVIEW' : 'VALID',
-    };
-
-    const directAgent = workspace.agents.find((a) => a.id === input.agentId);
-    let commissionJournal: JournalEntry | null = null;
-    let updatedAgents = workspace.agents;
-
-    if (directAgent) {
-      const directAmt = directAgent.directCommissionRate;
-      const parentAgent = directAgent.parentAgentId
-        ? workspace.agents.find((a) => a.id === directAgent.parentAgentId)
-        : undefined;
-      const overridingAmt = parentAgent
-        ? Math.round(directAmt * ((parentAgent.overridingRatePct || 10) / 100))
-        : 0;
-      const totalCommission = directAmt + overridingAmt;
-
-      updatedAgents = workspace.agents.map((a) => {
-        if (a.id === directAgent.id) {
-          return {
-            ...a,
-            jamaahCount: a.jamaahCount + 1,
-            commissionEarned: a.commissionEarned + directAmt,
-          };
-        }
-        if (parentAgent && a.id === parentAgent.id) {
-          return {
-            ...a,
-            commissionEarned: a.commissionEarned + overridingAmt,
-          };
-        }
-        return a;
+    try {
+      await apiRequest('/api/bookings', {
+        method: 'POST',
+        body: JSON.stringify({
+          jamaahName: input.jamaahName,
+          nikRaw: input.nikRaw,
+          phone: input.phone,
+          gender: input.gender,
+          departureId: input.departureId,
+          roomType: input.roomType,
+          mahramGroup: input.mahramGroup,
+          agentId: input.agentId || undefined,
+        }),
       });
-
-      commissionJournal = {
-        id: `j-com-${Date.now()}`,
-        tenantId: activeTenant.id,
-        entryNo: `COM-${bookingNo}`,
-        date: todayIso,
-        refType: 'COMMISSION',
-        kloterCode: dep.kloterCode,
-        description: `Akrual Komisi Agen ${directAgent.name} a/n ${newBooking.jamaahName}`,
-        lines: [
-          {
-            accountCode: '5-201',
-            accountName: 'Beban Komisi Agen & Marketing',
-            debit: totalCommission,
-            credit: 0,
-          },
-          {
-            accountCode: '2-102',
-            accountName: 'Hutang Komisi Agen',
-            debit: 0,
-            credit: totalCommission,
-          },
-        ],
-      };
+      await fetchWorkspace();
+      showFeedback(`Jamaah ${input.jamaahName} berhasil tersimpan ke PostgreSQL.`);
+    } catch (err: any) {
+      showFeedback(`Gagal mendaftarkan jamaah: ${err.message}`);
     }
-
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      bookings: [newBooking, ...prev.bookings],
-      departures: prev.departures.map((d) => {
-        if (d.id !== dep.id) return d;
-        const filledSeats = d.filledSeats + 1;
-        return {
-          ...d,
-          filledSeats,
-          status: filledSeats >= d.totalSeats ? 'FULL' : d.status,
-        };
-      }),
-      dmsRecords: [newDms, ...prev.dmsRecords],
-      agents: updatedAgents,
-      journals: commissionJournal ? [commissionJournal, ...prev.journals] : prev.journals,
-    }));
-
-    showFeedback(
-      `Jamaah ${newBooking.jamaahName} terdaftar (${bookingNo}). Antrean DMS & Invoice diterbitkan.`
-    );
   };
 
-  const handleUpdateRooming = (
+  const handleRecordPayment = async (input: {
+    bookingId: string;
+    amount: number;
+    method: PaymentMethod;
+  }): Promise<PaymentRecord | null> => {
+    try {
+      const created = await apiRequest<PaymentRecord>('/api/payments', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      await fetchWorkspace();
+      showFeedback(
+        `Pembayaran ${formatIDR(input.amount)} berhasil disimpan & terjurnal SAK ETAP.`
+      );
+      return created;
+    } catch (err: any) {
+      showFeedback(`Gagal memproses pembayaran: ${err.message}`);
+      return null;
+    }
+  };
+
+  // 1. Create Departure (Kloter) -> PostgreSQL
+  const handleCreateDeparture = async (input: {
+    packageId: string;
+    kloterCode: string;
+    airline: string;
+    departureDate: string;
+    returnDate: string;
+    totalSeats: number;
+  }) => {
+    try {
+      const created = await api.createDeparture(input);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        departures: [created, ...prev.departures],
+      }));
+      showFeedback(
+        `Kloter ${created.kloterCode} berhasil disimpan ke database (${created.totalSeats} seat).`
+      );
+    } catch (err: any) {
+      showFeedback(`Gagal buat kloter: ${err.message}`);
+    }
+  };
+
+  // 2. Dispatch Departure (SAK ETAP Revenue Recognition) -> PostgreSQL
+  const handleDispatchDeparture = async (departureId: string) => {
+    try {
+      const res = await api.dispatchDeparture(departureId);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        departures: prev.departures.map((d) =>
+          d.id === departureId ? res.departure : d
+        ),
+        journals: res.journal ? [res.journal, ...prev.journals] : prev.journals,
+      }));
+      showFeedback(
+        `Kloter ${res.departure.kloterCode} diberangkatkan. Pendapatan ${formatIDR(res.recognizedAmount)} diakui sesuai SAK ETAP.`
+      );
+    } catch (err: any) {
+      showFeedback(`Gagal berangkatkan kloter: ${err.message}`);
+    }
+  };
+
+  // 3. Rooming & Create Package -> PostgreSQL
+  const handleUpdateRooming = async (
     bookingId: string,
     roomNumber: string,
     mahramGroup: string
@@ -420,9 +311,14 @@ export default function App() {
         b.id === bookingId ? { ...b, roomNumber, mahramGroup } : b
       ),
     }));
+    try {
+      await api.updateRooming(bookingId, roomNumber, mahramGroup);
+    } catch (err: any) {
+      showFeedback(`Gagal menyimpan rooming: ${err.message}`);
+    }
   };
 
-  const handleCreatePackage = (input: {
+  const handleCreatePackage = async (input: {
     code: string;
     name: string;
     category: PackageCategory;
@@ -434,139 +330,41 @@ export default function App() {
     hotelMakkah: string;
     hotelMadinah: string;
   }) => {
-    const newPkg: TravelPackage = {
-      id: `pkg-${Date.now()}`,
-      tenantId: activeTenant.id,
-      ...input,
-    };
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      packages: [newPkg, ...prev.packages],
-    }));
-    showFeedback(`Paket ${newPkg.code} berhasil ditambahkan ke katalog.`);
+    try {
+      const created = await api.createPackage(input);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        packages: [created, ...prev.packages],
+      }));
+      showFeedback(`Paket ${created.code} berhasil ditambahkan ke database.`);
+    } catch (err: any) {
+      showFeedback(`Gagal membuat paket: ${err.message}`);
+    }
   };
 
-  // 4. Record Payment + Auto-Journal SAK ETAP
-  const handleRecordPayment = (input: {
-    bookingId: string;
-    amount: number;
-    method: PaymentMethod;
-  }): PaymentRecord | null => {
-    const targetBooking = workspace.bookings.find((b) => b.id === input.bookingId);
-    if (!targetBooking) return null;
-
-    const remaining = Math.max(0, targetBooking.totalAmount - targetBooking.paidAmount);
-    const verifiedAmt = Math.min(input.amount, remaining);
-    if (verifiedAmt <= 0) return null;
-
-    const receiptNo = `KWT-2026-${String(81 + workspace.payments.length).padStart(3, '0')}`;
-    const paymentRecord: PaymentRecord = {
-      id: `p-${Date.now()}`,
-      tenantId: activeTenant.id,
-      bookingId: targetBooking.id,
-      bookingNo: targetBooking.bookingNo,
-      receiptNo,
-      jamaahName: targetBooking.jamaahName,
-      method: input.method,
-      amount: verifiedAmt,
-      date: todayIso,
-      qrHash: `SIG-${activeTenant.code}-${Date.now().toString(36).toUpperCase().slice(-6)}`,
-    };
-
-    const cashAccount =
-      input.method === 'CASH'
-        ? { code: '1-101', name: 'Kas Tunai Kantor' }
-        : { code: '1-102', name: 'Bank Operasional Syariah (BSI)' };
-
-    const paymentJournal: JournalEntry = {
-      id: `j-${Date.now()}`,
-      tenantId: activeTenant.id,
-      entryNo: `JRN-${Math.floor(100000 + Math.random() * 900000)}`,
-      date: todayIso,
-      refType: 'PAYMENT',
-      kloterCode: targetBooking.kloterCode,
-      description: `Penerimaan ${input.method} a/n ${targetBooking.jamaahName} (${receiptNo})`,
-      lines: [
-        {
-          accountCode: cashAccount.code,
-          accountName: cashAccount.name,
-          debit: verifiedAmt,
-          credit: 0,
-        },
-        {
-          accountCode: '2-101',
-          accountName: 'Uang Muka Jamaah (Liabilitas)',
-          debit: 0,
-          credit: verifiedAmt,
-        },
-      ],
-    };
-
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      bookings: prev.bookings.map((b) => {
-        if (b.id !== targetBooking.id) return b;
-        const newPaid = b.paidAmount + verifiedAmt;
-        return {
-          ...b,
-          paidAmount: newPaid,
-          status: newPaid >= b.totalAmount ? 'PAID' : 'INSTALLMENT',
-        };
-      }),
-      payments: [paymentRecord, ...prev.payments],
-      journals: [paymentJournal, ...prev.journals],
-    }));
-
-    showFeedback(
-      `Pembayaran ${formatIDR(verifiedAmt)} (${receiptNo}) terverifikasi & terjurnal ke 2-101 Uang Muka Jamaah.`
-    );
-    return paymentRecord;
-  };
-
-  // 5. Record Manual Expense
-  const handleRecordExpense = (input: {
+  // 4. Record Manual Expense -> PostgreSQL
+  const handleRecordExpense = async (input: {
     description: string;
     expenseAccountCode: string;
     paymentAccountCode: string;
     amount: number;
     kloterCode?: string;
   }) => {
-    const expAcc = workspace.coa.find((c) => c.code === input.expenseAccountCode);
-    const payAcc = workspace.coa.find((c) => c.code === input.paymentAccountCode);
-    if (!expAcc || !payAcc) return;
-
-    const expenseJournal: JournalEntry = {
-      id: `j-exp-${Date.now()}`,
-      tenantId: activeTenant.id,
-      entryNo: `EXP-${Math.floor(10000 + Math.random() * 90000)}`,
-      date: todayIso,
-      refType: 'EXPENSE',
-      kloterCode: input.kloterCode || undefined,
-      description: input.description,
-      lines: [
-        {
-          accountCode: expAcc.code,
-          accountName: expAcc.name,
-          debit: input.amount,
-          credit: 0,
-        },
-        {
-          accountCode: payAcc.code,
-          accountName: payAcc.name,
-          debit: 0,
-          credit: input.amount,
-        },
-      ],
-    };
-
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      journals: [expenseJournal, ...prev.journals],
-    }));
-    showFeedback(`Jurnal pengeluaran ${formatIDR(input.amount)} berhasil diposting.`);
+    try {
+      const journal = await api.createExpense(input);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        journals: [journal, ...prev.journals],
+      }));
+      showFeedback(
+        `Jurnal pengeluaran ${formatIDR(input.amount)} berhasil disimpan ke database.`
+      );
+    } catch (err: any) {
+      showFeedback(`Gagal mencatat pengeluaran: ${err.message}`);
+    }
   };
 
-  // 6. DMS Document Update
+  // 5. DMS Update (Optimistic + Debounce untuk ketikan No. Paspor) -> PostgreSQL
   const handleUpdateDocument = (
     docId: string,
     patch: Partial<
@@ -584,167 +382,200 @@ export default function App() {
   ) => {
     updateActiveWorkspace((prev) => ({
       ...prev,
-      dmsRecords: prev.dmsRecords.map((d) => (d.id === docId ? { ...d, ...patch } : d)),
-    }));
-  };
-
-  // 7. Inventory Assembly, Restock & Kit Handover
-  const handleAssembleBundle = (quantity: number) => {
-    const components = workspace.inventory.filter((i) => !i.isBundle);
-    if (components.some((c) => c.qty < quantity)) return;
-
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      inventory: prev.inventory.map((item) =>
-        item.isBundle ? { ...item, qty: item.qty + quantity } : { ...item, qty: item.qty - quantity }
+      dmsRecords: prev.dmsRecords.map((d) =>
+        d.id === docId ? { ...d, ...patch } : d
       ),
     }));
-    showFeedback(`${quantity} set Paket Perlengkapan Siap Berangkat berhasil dirakit (Assembly).`);
-  };
 
-  const handleRestockItem = (itemId: string, addQty: number) => {
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      inventory: prev.inventory.map((item) =>
-        item.id === itemId ? { ...item, qty: item.qty + addQty } : item
-      ),
-    }));
-    showFeedback(`Stok barang ditambah +${addQty} pcs.`);
-  };
+    const isTextInput = 'passportNo' in patch || 'passportExpiry' in patch;
+    const sendPatch = async () => {
+      try {
+        await api.updateDms(docId, patch);
+      } catch (err: any) {
+        showFeedback(`Gagal simpan berkas DMS: ${err.message}`);
+      }
+    };
 
-  const handleDispatchKitToJamaah = (bookingId: string) => {
-    const bundle = workspace.inventory.find((i) => i.isBundle);
-    if (!bundle || bundle.qty < 1) return;
-
-    const targetBooking = workspace.bookings.find((b) => b.id === bookingId);
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      bookings: prev.bookings.map((b) =>
-        b.id === bookingId ? { ...b, kitDispatched: true } : b
-      ),
-      inventory: prev.inventory.map((i) =>
-        i.id === bundle.id ? { ...i, qty: i.qty - 1 } : i
-      ),
-    }));
-    if (targetBooking) {
-      showFeedback(`1 set perlengkapan diserahkan kepada ${targetBooking.jamaahName}.`);
+    if (isTextInput) {
+      window.clearTimeout(dmsDebounceRef.current[docId]);
+      dmsDebounceRef.current[docId] = window.setTimeout(() => {
+        void sendPatch();
+      }, 500);
+    } else {
+      void sendPatch();
     }
   };
 
-  // 8. Agency Commission Disbursement + Journal + ISO Incident
-  const handleDisburseCommission = (agentId: string) => {
-    const agent = workspace.agents.find((a) => a.id === agentId);
-    if (!agent) return;
-    const unpaid = Math.max(0, agent.commissionEarned - agent.commissionPaid);
-    if (unpaid <= 0) return;
-
-    const payoutJournal: JournalEntry = {
-      id: `j-paycom-${Date.now()}`,
-      tenantId: activeTenant.id,
-      entryNo: `PAYCOM-${agent.code}`,
-      date: todayIso,
-      refType: 'COMMISSION',
-      description: `Pencairan Komisi Agen ${agent.name} (${agent.code})`,
-      lines: [
-        {
-          accountCode: '2-102',
-          accountName: 'Hutang Komisi Agen',
-          debit: unpaid,
-          credit: 0,
-        },
-        {
-          accountCode: '1-102',
-          accountName: 'Bank Operasional Syariah (BSI)',
-          debit: 0,
-          credit: unpaid,
-        },
-      ],
-    };
-
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      agents: prev.agents.map((a) =>
-        a.id === agentId ? { ...a, commissionPaid: a.commissionEarned } : a
-      ),
-      journals: [payoutJournal, ...prev.journals],
-    }));
-
-    showFeedback(
-      `Komisi ${formatIDR(unpaid)} dicairkan kepada ${agent.name} dan dijurnal ke Buku Besar.`
-    );
+  // 6. Inventory Assembly, Restock & Kit Handover -> PostgreSQL
+  const handleAssembleBundle = async (quantity: number) => {
+    try {
+      const updatedItems = await api.assembleBundle(quantity);
+      updateActiveWorkspace((prev) => ({ ...prev, inventory: updatedItems }));
+      showFeedback(`${quantity} set Paket Perlengkapan berhasil dirakit.`);
+    } catch (err: any) {
+      showFeedback(`Gagal assembly gudang: ${err.message}`);
+    }
   };
 
-  const handleCreateAgent = (input: {
+  const handleRestockItem = async (itemId: string, addQty: number) => {
+    try {
+      const updated = await api.restockInventory(itemId, addQty);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        inventory: prev.inventory.map((i) => (i.id === itemId ? updated : i)),
+      }));
+      showFeedback(`Stok barang ditambah +${addQty} pcs.`);
+    } catch (err: any) {
+      showFeedback(`Gagal restock: ${err.message}`);
+    }
+  };
+
+  const handleDispatchKitToJamaah = async (bookingId: string) => {
+    try {
+      const res = await api.dispatchKit(bookingId);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        bookings: prev.bookings.map((b) =>
+          b.id === bookingId ? res.booking : b
+        ),
+        inventory: prev.inventory.map((i) =>
+          i.id === res.bundle.id ? res.bundle : i
+        ),
+      }));
+      showFeedback(
+        `1 set perlengkapan diserahkan kepada ${res.booking.jamaahName}.`
+      );
+    } catch (err: any) {
+      showFeedback(`Gagal serah terima kit: ${err.message}`);
+    }
+  };
+
+  // 7. Agency Commission, Agents & ISO SLA -> PostgreSQL
+  const handleDisburseCommission = async (agentId: string) => {
+    try {
+      const res = await api.disburseCommission(agentId);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        agents: prev.agents.map((a) => (a.id === agentId ? res.agent : a)),
+        journals: [res.journal, ...prev.journals],
+      }));
+      showFeedback(
+        `Komisi ${formatIDR(res.paidAmount)} dicairkan kepada ${res.agent.name}.`
+      );
+    } catch (err: any) {
+      showFeedback(`Gagal cairkan komisi: ${err.message}`);
+    }
+  };
+
+  const handleCreateAgent = async (input: {
     name: string;
     phone: string;
     parentAgentId?: string;
     directCommissionRate: number;
   }) => {
-    const parent = input.parentAgentId
-      ? workspace.agents.find((a) => a.id === input.parentAgentId)
-      : undefined;
-
-    const newAgent: Agent = {
-      id: `ag-${Date.now()}`,
-      tenantId: activeTenant.id,
-      code: `AGN-${String(workspace.agents.length + 1).padStart(3, '0')}`,
-      name: input.name,
-      phone: input.phone,
-      parentAgentId: parent?.id,
-      parentAgentName: parent ? `${parent.name} (Overriding 10%)` : undefined,
-      directCommissionRate: input.directCommissionRate,
-      overridingRatePct: 10,
-      jamaahCount: 0,
-      commissionEarned: 0,
-      commissionPaid: 0,
-    };
-
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      agents: [newAgent, ...prev.agents],
-    }));
-    showFeedback(`Agen ${newAgent.name} (${newAgent.code}) berhasil didaftarkan.`);
+    try {
+      const created = await api.createAgent(input);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        agents: [created, ...prev.agents],
+      }));
+      showFeedback(
+        `Agen ${created.name} (${created.code}) berhasil didaftarkan.`
+      );
+    } catch (err: any) {
+      showFeedback(`Gagal tambah agen: ${err.message}`);
+    }
   };
 
-  const handleUpdateIncidentStatus = (
+  const handleUpdateIncidentStatus = async (
     incidentId: string,
     status: IsoIncident['status'],
     resolutionNotes?: string
   ) => {
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      isoIncidents: prev.isoIncidents.map((inc) =>
-        inc.id === incidentId ? { ...inc, status, resolutionNotes } : inc
-      ),
-    }));
-    showFeedback('Tiket SLA ISO 9001:2015 diperbarui.');
+    try {
+      const updated = await api.updateIncident(
+        incidentId,
+        status,
+        resolutionNotes
+      );
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        isoIncidents: prev.isoIncidents.map((inc) =>
+          inc.id === incidentId ? updated : inc
+        ),
+      }));
+      showFeedback('Tiket SLA ISO 9001:2015 diperbarui.');
+    } catch (err: any) {
+      showFeedback(`Gagal update SLA: ${err.message}`);
+    }
   };
 
-  const handleCreateIncident = (input: {
+  const handleCreateIncident = async (input: {
     kloterCode: string;
     category: IncidentCategory;
     description: string;
     slaDeadline: string;
   }) => {
-    const newInc: IsoIncident = {
-      id: `iso-${Date.now()}`,
-      tenantId: activeTenant.id,
-      ticket: `SLA-2026-${String(20 + workspace.isoIncidents.length).padStart(3, '0')}`,
-      kloterCode: input.kloterCode,
-      category: input.category,
-      description: input.description,
-      slaDeadline: input.slaDeadline,
-      status: 'OPEN',
-    };
-    updateActiveWorkspace((prev) => ({
-      ...prev,
-      isoIncidents: [newInc, ...prev.isoIncidents],
-    }));
-    showFeedback(`Tiket SLA ${newInc.ticket} diterbitkan.`);
+    try {
+      const created = await api.createIncident(input);
+      updateActiveWorkspace((prev) => ({
+        ...prev,
+        isoIncidents: [created, ...prev.isoIncidents],
+      }));
+      showFeedback(`Tiket SLA ${created.ticket} diterbitkan.`);
+    } catch (err: any) {
+      showFeedback(`Gagal membuat tiket SLA: ${err.message}`);
+    }
   };
 
-  // 9. Super-Admin Tenant Provisioning
-  const handleCreateTenant = (input: {
+  const handleCreateTenantUser = async (input: {
+    name: string;
+    email: string;
+    password: string;
+    role: 'OPS' | 'FINANCE' | 'AGENT';
+  }) => {
+    try {
+      const created = await api.createTenantUser(input);
+      setTenantUsers((prev) => [created, ...prev]);
+      showFeedback(`Akun staf ${created.email} (${created.role}) berhasil dibuat.`);
+    } catch (err: any) {
+      showFeedback(err.message || 'Gagal membuat akun staf.');
+      throw err;
+    }
+  };
+
+  const handleUpdateTenantUser = async (
+    userId: string,
+    patch: {
+      name?: string;
+      role?: 'OPS' | 'FINANCE' | 'AGENT';
+      isActive?: boolean;
+      password?: string;
+    }
+  ) => {
+    try {
+      const updated = await api.updateTenantUser(userId, patch);
+      setTenantUsers((prev) => prev.map((u) => (u.id === userId ? updated : u)));
+      showFeedback(`Akun staf ${updated.email} berhasil diperbarui.`);
+    } catch (err: any) {
+      showFeedback(err.message || 'Gagal memperbarui akun staf.');
+      throw err;
+    }
+  };
+
+  const handleDeleteTenantUser = async (userId: string) => {
+    try {
+      await api.deleteTenantUser(userId);
+      setTenantUsers((prev) => prev.filter((u) => u.id !== userId));
+      showFeedback('Akun staf berhasil dihapus.');
+    } catch (err: any) {
+      showFeedback(err.message || 'Gagal menghapus akun staf.');
+      throw err;
+    }
+  };
+
+  // 8. Super-Admin Tenant Provisioning & Tema -> PostgreSQL
+  const handleCreateTenant = async (input: {
     name: string;
     subdomain: string;
     ppiu: string;
@@ -752,148 +583,195 @@ export default function App() {
     plan: PlanTier;
     primaryColor: string;
   }) => {
-    const id = `t-${Date.now()}`;
-    const initials = input.name
-      .replace(/^PT\s+/i, '')
-      .split(/\s+/)
-      .slice(0, 2)
-      .map((w) => w[0]?.toUpperCase() || '')
-      .join('');
-
-    const planLimits: Record<PlanTier, { maxJ: number; maxU: number }> = {
-      LITE: { maxJ: 100, maxU: 5 },
-      PRO: { maxJ: 350, maxU: 15 },
-      ENTERPRISE: { maxJ: 1000, maxU: 50 },
-    };
-
-    const newTenant: Tenant = {
-      id,
-      code: initials || 'TR',
-      name: input.name,
-      subdomain: input.subdomain,
-      ppiu: input.ppiu,
-      pihk: input.pihk || 'Belum Terdaftar',
-      plan: input.plan,
-      maxJamaahPerMonth: planLimits[input.plan].maxJ,
-      maxUsers: planLimits[input.plan].maxU,
-      primaryColor: input.primaryColor,
-      isActive: true,
-    };
-
-    const starterPkgId = `pkg-${id}`;
-    const starterWorkspace: TenantWorkspaceData = {
-      packages: [
-        {
-          id: starterPkgId,
-          tenantId: id,
-          code: 'UMR-9H-STD',
-          name: 'Umrah Reguler 9 Hari Perdana',
-          category: 'UMRAH',
-          durationDays: 9,
-          priceQuad: 27900000,
-          priceTriple: 29900000,
-          priceDouble: 32900000,
-          hppEstimate: 22800000,
-          hotelMakkah: 'Swissôtel Makkah (★5)',
-          hotelMadinah: 'Pullman Zamzam Madinah (★5)',
-        },
-      ],
-      departures: [
-        {
-          id: `dep-${id}`,
-          tenantId: id,
-          packageId: starterPkgId,
-          kloterCode: `${initials}-2027-01A`,
-          packageName: 'Umrah Reguler 9 Hari Perdana',
-          airline: 'Saudia Airlines',
-          departureDate: '2027-01-24',
-          returnDate: '2027-02-01',
-          totalSeats: 45,
-          filledSeats: 0,
-          estHppPerSeat: 22800000,
-          status: 'OPEN',
-        },
-      ],
-      bookings: [],
-      payments: [],
-      coa: STANDARD_TRAVEL_COA,
-      journals: [],
-      dmsRecords: [],
-      inventory: [
-        {
-          id: `inv-${id}-1`,
-          tenantId: id,
-          sku: 'ITM-KPR24',
-          name: 'Koper Hardcase 24 Inch',
-          warehouse: 'Gudang Utama',
-          qty: 50,
-          minStock: 20,
-          avgCost: 375000,
-          isBundle: false,
-        },
-        {
-          id: `inv-${id}-2`,
-          tenantId: id,
-          sku: 'BND-PKT01',
-          name: 'Paket Perlengkapan Siap Berangkat',
-          warehouse: 'Gudang Utama',
-          qty: 10,
-          minStock: 10,
-          avgCost: 700000,
-          isBundle: true,
-        },
-      ],
-      agents: [],
-      isoIncidents: [],
-    };
-
-    setState((prev) => ({
-      tenants: [...prev.tenants, newTenant],
-      workspaces: {
-        ...prev.workspaces,
-        [id]: starterWorkspace,
-      },
-    }));
-    setSelectedTenantId(id);
-    showFeedback(`Tenant ${newTenant.name} berhasil diprovisioning dengan Master COA SAK ETAP.`);
+    try {
+      const newTenant = await api.createTenant(input);
+      setTenants((prev) => [...prev, newTenant]);
+      showFeedback(
+        `Tenant ${newTenant.name} berhasil diprovisioning ke PostgreSQL.`
+      );
+    } catch (err: any) {
+      showFeedback(`Gagal provisioning tenant: ${err.message}`);
+    }
   };
 
-  const handleUpdateTenantTheme = (tenantId: string, primaryColor: string) => {
-    setState((prev) => ({
-      ...prev,
-      tenants: prev.tenants.map((t) =>
-        t.id === tenantId ? { ...t, primaryColor } : t
-      ),
-    }));
+  const handleUpdateTenantTheme = async (
+    tenantId: string,
+    primaryColor: string
+  ) => {
+    setTenants((prev) =>
+      prev.map((t) => (t.id === tenantId ? { ...t, primaryColor } : t))
+    );
+    setActiveTenant((prev) =>
+      prev && prev.id === tenantId ? { ...prev, primaryColor } : prev
+    );
+    try {
+      await api.updateTenantTheme(tenantId, primaryColor);
+    } catch (err: any) {
+      showFeedback(`Gagal update warna tema: ${err.message}`);
+    }
   };
 
-  const handleResetDemoData = () => {
-    localStorage.removeItem(STORAGE_KEY);
-    setState({
-      tenants: INITIAL_TENANTS,
-      workspaces: INITIAL_WORKSPACE_DATA,
-    });
-    setSelectedTenantId('t1');
-    setCurrentTab('dashboard');
-    showFeedback('Seluruh data simulasi ERP dikembalikan ke kondisi awal.');
+  const handleSwitchTenant = async (tenantId: string) => {
+    try {
+      const res = await api.switchTenant(tenantId);
+      const data = await apiRequest<WorkspaceApiResponse>('/api/workspace');
+      setCurrentUserId(data.user.id);
+      setActiveRole(data.user.role);
+      setActiveTenant(data.tenant);
+      setTenants(data.tenants && data.tenants.length > 0 ? data.tenants : [data.tenant]);
+      setWorkspace(data.workspace);
+      if (data.user.role === 'SUPER_ADMIN') {
+        try {
+          const allUsers = await api.listUsers();
+          setUsers(allUsers);
+        } catch {
+          // Abaikan jika gagal memuat daftar user
+        }
+      }
+      showFeedback(`Berpindah workspace aktif ke ${res.tenant.name}.`);
+    } catch (err: any) {
+      showFeedback(err.message || 'Gagal berpindah workspace tenant.');
+    }
+  };
+
+  const handleCreateUser = async (input: {
+    tenantId: string;
+    name: string;
+    email: string;
+    password: string;
+    role: UserRole;
+  }) => {
+    try {
+      const created = await api.createUser(input);
+      setUsers((prev) => [created, ...prev]);
+      showFeedback(`Akun ${created.email} (${created.role}) berhasil dibuat.`);
+    } catch (err: any) {
+      showFeedback(err.message || 'Gagal membuat akun pengguna.');
+      throw err;
+    }
+  };
+
+  const handleUpdateUser = async (
+    userId: string,
+    patch: {
+      name?: string;
+      tenantId?: string;
+      role?: UserRole;
+      isActive?: boolean;
+      password?: string;
+    }
+  ) => {
+    try {
+      const updated = await api.updateUser(userId, patch);
+      setUsers((prev) => prev.map((u) => (u.id === userId ? updated : u)));
+      showFeedback(`Akun ${updated.email} berhasil diperbarui.`);
+    } catch (err: any) {
+      showFeedback(err.message || 'Gagal memperbarui akun pengguna.');
+      throw err;
+    }
+  };
+
+  const handleDeleteUser = async (userId: string) => {
+    try {
+      await api.deleteUser(userId);
+      setUsers((prev) => prev.filter((u) => u.id !== userId));
+      showFeedback('Akun pengguna berhasil dihapus.');
+    } catch (err: any) {
+      showFeedback(err.message || 'Gagal menghapus akun pengguna.');
+      throw err;
+    }
+  };
+
+  const handleLogoutAndRefresh = async () => {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    setAuthRequired(true);
+    setActiveTenant(null);
+    setWorkspace(EMPTY_WORKSPACE);
+  };
+
+  // ==========================================================
+  // RENDER STATE: LOADING / LOGIN / WORKSPACE
+  // ==========================================================
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-xs text-slate-500">
+        Memuat workspace SafarLedger ERP dari server...
+      </div>
+    );
+  }
+
+  if (authRequired || !activeTenant) {
+    return <LoginView onLoginSuccess={fetchWorkspace} />;
+  }
+
+  const handleUploadDmsFile = async (
+    dmsId: string,
+    docType: 'KTP' | 'KK' | 'PASPOR' | 'MENINGITIS',
+    file: File
+  ) => {
+    try {
+      const { uploadUrl, objectKey } = await apiRequest<{
+        uploadUrl: string;
+        objectKey: string;
+      }>('/api/dms/upload-url', {
+        method: 'POST',
+        body: JSON.stringify({
+          dmsId,
+          docType,
+          mimeType: file.type,
+          fileSize: file.size,
+        }),
+      });
+
+      const uploadRes = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      if (!uploadRes.ok) throw new Error('Gagal mengunggah file ke storage.');
+
+      await apiRequest(`/api/dms/${dmsId}/attach`, {
+        method: 'PATCH',
+        body: JSON.stringify({ docType, objectKey }),
+      });
+
+      await fetchWorkspace();
+      showFeedback(`Berkas ${docType} berhasil diunggah ke storage terenkripsi.`);
+    } catch (err: any) {
+      showFeedback(`Upload gagal: ${err.message}`);
+    }
+  };
+
+  const handleViewDmsFile = async (
+    dmsId: string,
+    docType: 'KTP' | 'KK' | 'PASPOR' | 'MENINGITIS'
+  ) => {
+    try {
+      const { viewUrl } = await apiRequest<{ viewUrl: string }>(
+        `/api/dms/${dmsId}/view-url?docType=${docType}`
+      );
+      const link = document.createElement('a');
+      link.href = viewUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.click();
+    } catch (err: any) {
+      showFeedback(`Gagal membuka dokumen: ${err.message}`);
+    }
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
       <TopBar
-        tenants={state.tenants}
+        tenants={tenants}
         selectedTenantId={activeTenant.id}
-        onChangeTenant={(id) => {
-          setSelectedTenantId(id);
-          showFeedback(
-            `Berpindah ke workspace ${state.tenants.find((t) => t.id === id)?.name || ''}`
-          );
-        }}
+        onChangeTenant={activeRole === 'SUPER_ADMIN' ? handleSwitchTenant : undefined}
         activeRole={activeRole}
-        onChangeRole={handleChangeRole}
+        allowedTabs={allowedTabs}
         currentTab={currentTab}
-        onSelectTab={setCurrentTab}
-        onOpenQuickRegister={() => setCurrentTab('bookings')}
+        onSelectTab={handleNavigateTab}
+        onOpenQuickRegister={() => handleNavigateTab('bookings')}
       />
 
       <div className="flex flex-1 min-h-0">
@@ -901,11 +779,11 @@ export default function App() {
           activeTenant={activeTenant}
           activeRole={activeRole}
           currentTab={currentTab}
-          onSelectTab={setCurrentTab}
+          onSelectTab={handleNavigateTab}
           expiredPassportCount={expiredPassportCount}
           openIsoCount={openIsoCount}
           lowStockCount={lowStockCount}
-          onResetDemoData={handleResetDemoData}
+          onResetDemoData={handleLogoutAndRefresh}
         />
 
         <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-7 max-w-7xl mx-auto w-full space-y-6">
@@ -925,9 +803,10 @@ export default function App() {
             </div>
           )}
 
-          {currentTab === 'dashboard' && (
+          {currentTab === 'dashboard' && allowedTabs.includes('dashboard') && (
             <DashboardView
               tenant={activeTenant}
+              coa={workspace.coa}
               departures={workspace.departures}
               packages={workspace.packages}
               bookings={workspace.bookings}
@@ -936,11 +815,11 @@ export default function App() {
               openIsoCount={openIsoCount}
               onDispatchDeparture={handleDispatchDeparture}
               onCreateDeparture={handleCreateDeparture}
-              onNavigateTab={setCurrentTab}
+              onNavigateTab={handleNavigateTab}
             />
           )}
 
-          {currentTab === 'bookings' && (
+          {currentTab === 'bookings' && allowedTabs.includes('bookings') && (
             <BookingsView
               tenant={activeTenant}
               packages={workspace.packages}
@@ -953,14 +832,16 @@ export default function App() {
             />
           )}
 
-          {currentTab === 'dms' && (
+          {currentTab === 'dms' && allowedTabs.includes('dms') && (
             <DmsView
               dmsRecords={workspace.dmsRecords}
               onUpdateDocument={handleUpdateDocument}
+              onUploadFile={handleUploadDmsFile}
+              onViewFile={handleViewDmsFile}
             />
           )}
 
-          {currentTab === 'payments' && (
+          {currentTab === 'payments' && allowedTabs.includes('payments') && (
             <PaymentsView
               tenant={activeTenant}
               bookings={workspace.bookings}
@@ -969,7 +850,7 @@ export default function App() {
             />
           )}
 
-          {currentTab === 'accounting' && (
+          {currentTab === 'accounting' && allowedTabs.includes('accounting') && (
             <AccountingView
               tenant={activeTenant}
               coa={workspace.coa}
@@ -979,7 +860,7 @@ export default function App() {
             />
           )}
 
-          {currentTab === 'inventory' && (
+          {currentTab === 'inventory' && allowedTabs.includes('inventory') && (
             <InventoryView
               tenant={activeTenant}
               inventory={workspace.inventory}
@@ -990,7 +871,7 @@ export default function App() {
             />
           )}
 
-          {currentTab === 'agents' && (
+          {currentTab === 'agents' && allowedTabs.includes('agents') && (
             <AgentsIsoView
               tenant={activeTenant}
               agents={workspace.agents}
@@ -1003,16 +884,32 @@ export default function App() {
             />
           )}
 
-          {currentTab === 'superadmin' && (
+          {currentTab === 'users' && activeRole === 'OWNER' && (
+            <TenantUsersView
+              tenant={activeTenant}
+              currentUserId={currentUserId}
+              users={tenantUsers}
+              onCreateUser={handleCreateTenantUser}
+              onUpdateUser={handleUpdateTenantUser}
+              onDeleteUser={handleDeleteTenantUser}
+            />
+          )}
+
+          {currentTab === 'superadmin' && activeRole === 'SUPER_ADMIN' && (
             <SuperAdminView
-              tenants={state.tenants}
+              tenants={tenants}
               activeTenantId={activeTenant.id}
-              onSelectTenant={(id) => {
-                setSelectedTenantId(id);
-                setCurrentTab('dashboard');
+              currentUserId={currentUserId}
+              users={users}
+              onSelectTenant={async (id) => {
+                await handleSwitchTenant(id);
+                handleNavigateTab('dashboard');
               }}
               onCreateTenant={handleCreateTenant}
               onUpdateTenantTheme={handleUpdateTenantTheme}
+              onCreateUser={handleCreateUser}
+              onUpdateUser={handleUpdateUser}
+              onDeleteUser={handleDeleteUser}
             />
           )}
         </main>

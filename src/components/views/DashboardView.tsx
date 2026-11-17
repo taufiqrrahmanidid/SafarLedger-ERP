@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import {
   Booking,
+  ChartOfAccount,
   Departure,
   ErpTab,
   JournalEntry,
@@ -19,9 +20,12 @@ import {
   TravelPackage,
 } from '../../types/erp';
 import { formatIDR, formatShortDate } from '../../utils/formatters';
+import { heroMakkahImg, resolvePackageImage } from '../../utils/packageImages';
+import { HijriDateLine, RubElHizbMark } from '../IslamicOrnament';
 
 interface DashboardViewProps {
   tenant: Tenant;
+  coa: ChartOfAccount[];
   departures: Departure[];
   packages: TravelPackage[];
   bookings: Booking[];
@@ -40,10 +44,9 @@ interface DashboardViewProps {
   onNavigateTab: (tab: ErpTab) => void;
 }
 
-const HERO_IMAGE_PATH = '/src/assets/images/hero_makkah_sanctuary_1794804833377.jpg';
-
 export const DashboardView: React.FC<DashboardViewProps> = ({
   tenant,
+  coa,
   departures,
   packages,
   bookings,
@@ -60,12 +63,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [hoveredMonthIdx, setHoveredMonthIdx] = useState<number | null>(null);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
 
+  const currentYear = new Date().getFullYear();
+  const defaultDepDate = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const defaultRetDate = new Date(Date.now() + 38 * 86400000).toISOString().slice(0, 10);
+
   const [newKloter, setNewKloter] = useState({
     packageId: packages[0]?.id || '',
-    kloterCode: `KLT-2027-0${departures.length + 2}A`,
+    kloterCode: `KLT-${currentYear}-${String(departures.length + 1).padStart(2, '0')}A`,
     airline: 'Saudia Airlines (SV-819)',
-    departureDate: '2027-02-14',
-    returnDate: '2027-02-22',
+    departureDate: defaultDepDate,
+    returnDate: defaultRetDate,
     totalSeats: 45,
   });
 
@@ -74,13 +81,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     [departures]
   );
 
-  // Live SAK ETAP ledger calculations
+  // Live SAK ETAP ledger calculations from real COA opening balances + journals
   const financialSummary = useMemo(() => {
-    const cashOpening = 455000000;
+    const cashOpening = coa
+      .filter((c) => c.code === '1-101' || c.code === '1-102')
+      .reduce((sum, c) => sum + c.openingBalance, 0);
+    const unearnedOpening = coa.find((c) => c.code === '2-101')?.openingBalance || 0;
+    const recognizedOpening = coa.find((c) => c.code === '4-101')?.openingBalance || 0;
+    const hppOpening = coa.find((c) => c.code === '5-101')?.openingBalance || 0;
+
     let bankDelta = 0;
-    let unearnedLiability = 0;
-    let recognizedRevenue = 0;
-    let totalHpp = 0;
+    let unearnedDelta = 0;
+    let recognizedDelta = 0;
+    let hppDelta = 0;
 
     for (const j of journals) {
       for (const l of j.lines) {
@@ -88,18 +101,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           bankDelta += l.debit - l.credit;
         }
         if (l.accountCode === '2-101') {
-          unearnedLiability += l.credit - l.debit;
+          unearnedDelta += l.credit - l.debit;
         }
         if (l.accountCode === '4-101') {
-          recognizedRevenue += l.credit - l.debit;
+          recognizedDelta += l.credit - l.debit;
         }
         if (l.accountCode === '5-101') {
-          totalHpp += l.debit - l.credit;
+          hppDelta += l.debit - l.credit;
         }
       }
     }
 
     const cashBank = cashOpening + bankDelta;
+    const unearnedLiability = unearnedOpening + unearnedDelta;
+    const recognizedRevenue = recognizedOpening + recognizedDelta;
+    const totalHpp = hppOpening + hppDelta;
     const grossMarginPct =
       recognizedRevenue > 0
         ? (((recognizedRevenue - totalHpp) / recognizedRevenue) * 100).toFixed(1)
@@ -112,7 +128,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       totalHpp,
       grossMarginPct,
     };
-  }, [journals]);
+  }, [coa, journals]);
 
   const paidBookingsCount = bookings.filter((b) => b.status === 'PAID').length;
   const installmentCount = bookings.filter(
@@ -120,15 +136,45 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   ).length;
 
   const monthlySeries = useMemo(() => {
-    const currentMonthInflow = bookings.reduce((sum, b) => sum + b.paidAmount, 0);
-    return [
-      { label: 'Jul', inflow: 320000000, recognized: 280000000 },
-      { label: 'Agu', inflow: 540000000, recognized: 490000000 },
-      { label: 'Sep', inflow: 680000000, recognized: 610000000 },
-      { label: 'Okt', inflow: 1460000000, recognized: financialSummary.recognizedRevenue },
-      { label: 'Nov', inflow: currentMonthInflow, recognized: 0 },
-    ];
-  }, [bookings, financialSummary.recognizedRevenue]);
+    const now = new Date();
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    const months: { key: string; label: string; year: number; inflow: number; recognized: number }[] = [];
+
+    for (let offset = 4; offset >= 0; offset--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      months.push({
+        key: `${yyyy}-${mm}`,
+        label: monthNames[d.getMonth()],
+        year: yyyy,
+        inflow: 0,
+        recognized: 0,
+      });
+    }
+
+    for (const j of journals) {
+      const monthKey = j.date.slice(0, 7);
+      const bucket = months.find((m) => m.key === monthKey);
+      if (!bucket) continue;
+
+      if (j.refType === 'PAYMENT') {
+        for (const l of j.lines) {
+          if (l.accountCode === '1-101' || l.accountCode === '1-102') {
+            bucket.inflow += l.debit;
+          }
+        }
+      } else if (j.refType === 'DEPARTURE_RECOGNITION') {
+        for (const l of j.lines) {
+          if (l.accountCode === '4-101') {
+            bucket.recognized += l.credit - l.debit;
+          }
+        }
+      }
+    }
+
+    return months;
+  }, [journals]);
 
   const maxChartVal = Math.max(
     ...monthlySeries.map((m) => Math.max(m.inflow, m.recognized)),
@@ -141,8 +187,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         statusFilter === 'ALL'
           ? true
           : statusFilter === 'OPEN'
-          ? d.status === 'OPEN' || d.status === 'FULL'
-          : d.status === 'DEPARTED' || d.status === 'COMPLETED';
+            ? d.status === 'OPEN' || d.status === 'FULL'
+            : d.status === 'DEPARTED' || d.status === 'COMPLETED';
       const q = searchQuery.trim().toLowerCase();
       const matchesQuery =
         !q ||
@@ -160,10 +206,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setShowNewKloterModal(false);
     setNewKloter({
       packageId: packages[0]?.id || '',
-      kloterCode: `KLT-2027-0${departures.length + 3}A`,
+      kloterCode: `KLT-${currentYear}-${String(departures.length + 2).padStart(2, '0')}A`,
       airline: 'Saudia Airlines (SV-819)',
-      departureDate: '2027-03-10',
-      returnDate: '2027-03-18',
+      departureDate: defaultDepDate,
+      returnDate: defaultRetDate,
       totalSeats: 45,
     });
   };
@@ -171,53 +217,66 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Executive Welcome Hero Split */}
-      <div className="bg-white border border-slate-200/80 rounded-2xl overflow-hidden shadow-xs grid grid-cols-1 lg:grid-cols-12 items-stretch">
-        <div className="lg:col-span-7 p-6 sm:p-7 flex flex-col justify-between gap-5">
-          <div className="space-y-2.5">
-            <div className="text-xs font-medium text-slate-500 tabular">
-              {tenant.name} · Izin PPIU {tenant.ppiu} · Izin PIHK {tenant.pihk}
+      <div className="bg-white border border-slate-200/80 rounded-2xl overflow-hidden shadow-[0_1px_3px_rgba(15,23,42,0.04)] grid grid-cols-1 lg:grid-cols-12 items-stretch">
+        <div className="lg:col-span-7 p-6 sm:p-8 flex flex-col justify-between gap-6 islamic-girih-light relative">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 tabular">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-900">
+                <RubElHizbMark className="w-3.5 h-3.5 text-amber-600" />
+                <span>{tenant.name}</span>
+              </span>
+              <span className="text-slate-300">·</span>
+              <span>Izin PPIU {tenant.ppiu}</span>
+              <span className="text-slate-300">·</span>
+              <span>Izin PIHK {tenant.pihk}</span>
             </div>
-            <h1 className="text-2xl sm:text-[26px] font-bold text-slate-900 font-display leading-snug text-balance">
+            <h1 className="text-2xl sm:text-[27px] font-bold text-slate-900 font-display leading-snug text-balance">
               Pusat Kendali Operasional &amp; Keuangan Travel Haji &amp; Umrah
             </h1>
             <p className="text-sm text-slate-600 max-w-2xl leading-relaxed">
               Pantau arus kas masuk jamaah, pengakuan pendapatan SAK ETAP per kloter, kesiapan visa paspor, dan margin keberangkatan secara real-time.
             </p>
+            <div className="pt-0.5 text-[11px] font-medium text-amber-800/90">
+              <HijriDateLine />
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 pt-1">
-            <button
-              type="button"
-              onClick={() => setShowNewKloterModal(true)}
-              className="h-10 px-4 text-xs font-semibold text-white rounded-lg inline-flex items-center gap-1.5 shadow-xs transition-all duration-150 hover:opacity-95 whitespace-nowrap"
-              style={{ backgroundColor: tenant.primaryColor }}
-            >
-              <Plus className="w-4 h-4" />
-              <span>Buat Kloter Baru</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigateTab('payments')}
-              className="h-10 px-4 text-xs font-semibold bg-slate-50 border border-slate-200 text-slate-800 rounded-lg hover:bg-slate-100 transition-colors duration-150 whitespace-nowrap"
-            >
-              Input Pembayaran Jamaah
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigateTab('accounting')}
-              className="h-10 px-3 text-xs font-semibold text-slate-600 hover:text-slate-900 inline-flex items-center gap-1 whitespace-nowrap"
-            >
-              <span>Laporan Laba Rugi</span>
-              <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
+          <div className="space-y-4">
+            <div className="gold-hairline-b" />
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowNewKloterModal(true)}
+                className="h-10 px-4 text-xs font-semibold text-white rounded-xl inline-flex items-center gap-1.5 shadow-xs transition-all duration-150 hover:opacity-95 whitespace-nowrap ring-1 ring-amber-300/30"
+                style={{ backgroundColor: tenant.primaryColor }}
+              >
+                <Plus className="w-4 h-4" />
+                <span>Buat Kloter Baru</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('payments')}
+                className="h-10 px-4 text-xs font-semibold bg-white border border-slate-200 text-slate-800 rounded-xl hover:bg-slate-50 transition-colors duration-150 whitespace-nowrap shadow-2xs"
+              >
+                Input Pembayaran Jamaah
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('accounting')}
+                className="h-10 px-3 text-xs font-semibold text-emerald-900 hover:text-emerald-700 inline-flex items-center gap-1 whitespace-nowrap"
+              >
+                <span>Laporan Laba Rugi</span>
+                <ArrowUpRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
 
         {/* Visual Anchor Right Panel */}
-        <div className="lg:col-span-5 relative min-h-[200px] lg:min-h-full bg-slate-900 overflow-hidden">
+        <div className="lg:col-span-5 relative min-h-[220px] lg:min-h-full bg-[#071D17] overflow-hidden">
           {!heroImgFailed ? (
             <img
-              src={HERO_IMAGE_PATH}
+              src={heroMakkahImg}
               alt="Arsitektur pelataran marmer nuansa Baitullah saat fajar"
               referrerPolicy="no-referrer"
               onError={() => setHeroImgFailed(true)}
@@ -225,23 +284,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             />
           ) : (
             <div
-              className="w-full h-full lg:absolute lg:inset-0"
+              className="w-full h-full lg:absolute lg:inset-0 islamic-girih-dark"
               style={{
-                background: `linear-gradient(135deg, ${tenant.primaryColor} 0%, #0F172A 100%)`,
+                background: `linear-gradient(135deg, ${tenant.primaryColor} 0%, #051410 100%)`,
               }}
             />
           )}
-          <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/45 to-slate-950/15" />
+          <div className="absolute inset-0 bg-gradient-to-t from-[#051410]/92 via-[#071D17]/40 to-transparent" />
 
           {nextDeparture && (
-            <div className="relative lg:absolute inset-x-0 bottom-0 p-5 text-white space-y-1.5">
+            <div className="relative lg:absolute inset-x-0 bottom-0 p-6 text-white space-y-1.5">
               <div className="text-[11px] font-medium text-amber-300 tabular">
                 Keberangkatan Terdekat · {formatShortDate(nextDeparture.departureDate)}
               </div>
               <div className="text-base font-bold font-display leading-snug">
                 {nextDeparture.kloterCode} — {nextDeparture.packageName}
               </div>
-              <div className="flex items-center justify-between text-xs text-slate-200 tabular pt-1">
+              <div className="flex items-center justify-between text-xs text-emerald-100/85 tabular pt-1">
                 <span>{nextDeparture.airline}</span>
                 <span className="font-semibold text-white">
                   {nextDeparture.filledSeats} / {nextDeparture.totalSeats} Seat Terisi
@@ -254,11 +313,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* 4-Column Modern KPI Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+        <div className="bg-white border border-slate-200/80 hover:border-emerald-900/20 transition-colors rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-500">Kas &amp; Bank Operasional</span>
             <span
-              className="w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0"
+              className="w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0 ring-1 ring-amber-300/30"
               style={{ backgroundColor: tenant.primaryColor }}
             >
               <Landmark className="w-4 h-4" />
@@ -272,25 +331,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+        <div className="bg-white border border-slate-200/80 hover:border-emerald-900/20 transition-colors rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-500">Pendapatan Diakui (SAK ETAP)</span>
-            <span className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+            <span className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-200/70 flex items-center justify-center shrink-0">
               <TrendingUp className="w-4 h-4" />
             </span>
           </div>
           <div className="text-2xl font-bold text-slate-900 mt-3 tabular font-display tracking-tight">
             {formatIDR(financialSummary.recognizedRevenue)}
           </div>
-          <div className="text-xs text-emerald-700 mt-2 tabular font-semibold">
+          <div className="text-xs text-emerald-800 mt-2 tabular font-semibold">
             Margin Kotor Realisasi: {financialSummary.grossMarginPct}%
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+        <div className="bg-white border border-slate-200/80 hover:border-emerald-900/20 transition-colors rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-500">Total Jamaah Terdaftar</span>
-            <span className="w-8 h-8 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+            <span className="w-9 h-9 rounded-xl bg-amber-50/70 text-amber-800 border border-amber-200/70 flex items-center justify-center shrink-0">
               <Users className="w-4 h-4" />
             </span>
           </div>
@@ -303,10 +362,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+        <div className="bg-white border border-slate-200/80 hover:border-emerald-900/20 transition-colors rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-500">Kepatuhan Paspor &amp; SLA</span>
-            <span className="w-8 h-8 rounded-lg bg-amber-50 text-amber-700 flex items-center justify-center shrink-0">
+            <span className="w-9 h-9 rounded-xl bg-amber-50 text-amber-700 border border-amber-200/70 flex items-center justify-center shrink-0">
               <AlertCircle className="w-4 h-4" />
             </span>
           </div>
@@ -335,7 +394,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* Analytics Chart + Occupancy Split */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-8 bg-white border border-slate-200/80 rounded-xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+        <div className="lg:col-span-8 bg-white border border-slate-200/80 rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-slate-100">
             <div>
               <h2 className="text-sm font-semibold text-slate-900 font-display">
@@ -394,12 +453,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
               {monthlySeries.map((m, i) => {
                 const groupX = 85 + i * 100;
-                const hInflow = Math.max(4, (m.inflow / maxChartVal) * 126);
+                const hInflow = m.inflow > 0 ? Math.max(4, (m.inflow / maxChartVal) * 126) : 0;
                 const hRec = m.recognized > 0 ? Math.max(4, (m.recognized / maxChartVal) * 126) : 0;
                 const isHovered = hoveredMonthIdx === i;
                 return (
                   <g
-                    key={m.label}
+                    key={m.key}
                     onMouseEnter={() => setHoveredMonthIdx(i)}
                     onMouseLeave={() => setHoveredMonthIdx(null)}
                     className="cursor-pointer"
@@ -434,9 +493,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       x={groupX + 27}
                       y="170"
                       textAnchor="middle"
-                      className={`text-[11px] font-medium ${
-                        isHovered ? 'fill-slate-900 font-semibold' : 'fill-slate-500'
-                      }`}
+                      className={`text-[11px] font-medium ${isHovered ? 'fill-slate-900 font-semibold' : 'fill-slate-500'
+                        }`}
                     >
                       {m.label}
                     </text>
@@ -449,7 +507,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {hoveredMonthIdx !== null ? (
                 <>
                   <span className="font-semibold text-slate-900">
-                    Periode {monthlySeries[hoveredMonthIdx].label} 2026
+                    Periode {monthlySeries[hoveredMonthIdx].label} {monthlySeries[hoveredMonthIdx].year}
                   </span>
                   <span>
                     Kas Masuk:{' '}
@@ -472,7 +530,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* Okupansi Seat Kloter */}
-        <div className="lg:col-span-4 bg-white border border-slate-200/80 rounded-xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] flex flex-col justify-between">
+        <div className="lg:col-span-4 bg-white border border-slate-200/80 rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] flex flex-col justify-between">
           <div>
             <div className="pb-3.5 border-b border-slate-100 flex items-center justify-between">
               <div>
@@ -549,27 +607,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           {packages.slice(0, 3).map((pkg) => (
             <div
               key={pkg.id}
-              className="bg-white border border-slate-200/80 rounded-xl overflow-hidden shadow-[0_1px_3px_rgba(15,23,42,0.04)] hover:shadow-md transition-shadow duration-200 flex flex-col justify-between"
+              className="bg-white border border-slate-200/80 rounded-2xl overflow-hidden shadow-[0_1px_3px_rgba(15,23,42,0.04)] hover:shadow-md transition-all duration-200 flex flex-col justify-between"
             >
               <div>
                 <div className="aspect-[4/3] bg-slate-100 relative overflow-hidden">
-                  {pkg.imageUrl ? (
-                    <img
-                      src={pkg.imageUrl}
-                      alt={pkg.name}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover transition-transform duration-300 hover:scale-[1.03]"
-                    />
-                  ) : (
-                    <div
-                      className="w-full h-full flex items-center justify-center text-white font-display font-semibold text-sm"
-                      style={{
-                        background: `linear-gradient(135deg, ${tenant.primaryColor} 0%, #1E293B 100%)`,
-                      }}
-                    >
-                      {pkg.code}
-                    </div>
-                  )}
+                  <img
+                    src={resolvePackageImage(pkg.imageUrl, pkg.category)}
+                    alt={pkg.name}
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover transition-transform duration-300 hover:scale-[1.03]"
+                  />
                 </div>
 
                 <div className="p-4 space-y-2">
@@ -608,7 +655,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </div>
 
       {/* Jadwal Keberangkatan & Analisis Margin Table */}
-      <div className="bg-white border border-slate-200/80 rounded-xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+      <div className="bg-white border border-slate-200/80 rounded-2xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
         <div className="px-5 py-4 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div>
             <h2 className="text-sm font-semibold text-slate-900 font-display">
@@ -638,11 +685,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   key={tab.id}
                   type="button"
                   onClick={() => setStatusFilter(tab.id)}
-                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors duration-150 whitespace-nowrap ${
-                    statusFilter === tab.id
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors duration-150 whitespace-nowrap ${statusFilter === tab.id
                       ? 'bg-white text-slate-900 shadow-2xs'
                       : 'text-slate-600 hover:text-slate-900'
-                  }`}
+                    }`}
                 >
                   {tab.label}
                 </button>
@@ -675,10 +721,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               ) : (
                 filteredDepartures.map((d) => {
                   const kloterBookings = bookings.filter((b) => b.departureId === d.id);
-                  const contractRevenue =
-                    d.status === 'DEPARTED' && kloterBookings.length === 0
-                      ? 1460000000
-                      : kloterBookings.reduce((sum, b) => sum + b.totalAmount, 0);
+                  const contractRevenue = kloterBookings.reduce((sum, b) => sum + b.totalAmount, 0);
                   const estHpp = d.filledSeats * d.estHppPerSeat;
                   const estMargin = contractRevenue - estHpp;
 

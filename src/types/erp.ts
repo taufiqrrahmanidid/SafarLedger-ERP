@@ -8,6 +8,7 @@ export type ErpTab =
   | 'accounting'
   | 'inventory'
   | 'agents'
+  | 'users'
   | 'superadmin';
 
 export type PlanTier = 'LITE' | 'PRO' | 'ENTERPRISE';
@@ -147,6 +148,10 @@ export interface DmsRecord {
   passportStatus: DocValidationStatus;
   meningitisStatus: DocValidationStatus;
   mahramDocStatus: DocValidationStatus;
+  hasKtpFile?: boolean;
+  hasKkFile?: boolean;
+  hasPassportFile?: boolean;
+  hasMeningitisFile?: boolean;
 }
 
 export interface InventoryItem {
@@ -202,4 +207,20 @@ export interface TenantWorkspaceData {
   inventory: InventoryItem[];
   agents: Agent[];
   isoIncidents: IsoIncident[];
+}
+
+export interface SystemUser {
+  id: string;
+  tenantId: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  isActive: boolean;
+  createdAt: string;
+  tenant?: {
+    id: string;
+    code: string;
+    name: string;
+    subdomain: string;
+  };
 }

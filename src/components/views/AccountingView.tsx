@@ -128,7 +128,7 @@ export const AccountingView: React.FC<AccountingViewProps> = ({
             <h2 className="text-sm font-semibold text-slate-900 font-display">
               Laporan Laba Rugi (Profit &amp; Loss)
             </h2>
-            <span className="text-xs text-slate-500">Periode Berjalan 2026</span>
+            <span className="text-xs text-slate-500">Periode Berjalan {new Date().getFullYear()}</span>
           </div>
           <div className="divide-y divide-slate-100 text-xs">
             <div className="px-5 py-3 flex justify-between">
@@ -223,11 +223,10 @@ export const AccountingView: React.FC<AccountingViewProps> = ({
                 key={f.id}
                 type="button"
                 onClick={() => setRefFilter(f.id)}
-                className={`px-3 py-1 text-xs font-medium rounded-md whitespace-nowrap transition-colors duration-150 ${
-                  refFilter === f.id
+                className={`px-3 py-1 text-xs font-medium rounded-md whitespace-nowrap transition-colors duration-150 ${refFilter === f.id
                     ? 'bg-white text-slate-900 shadow-2xs'
                     : 'text-slate-600 hover:text-slate-900'
-                }`}
+                  }`}
               >
                 {f.label}
               </button>
@@ -266,9 +265,8 @@ export const AccountingView: React.FC<AccountingViewProps> = ({
                       ) : null}
                     </td>
                     <td
-                      className={`py-2.5 px-4 font-mono-code text-slate-900 whitespace-nowrap ${
-                        line.credit > 0 ? 'pl-8 text-slate-600' : 'font-semibold'
-                      }`}
+                      className={`py-2.5 px-4 font-mono-code text-slate-900 whitespace-nowrap ${line.credit > 0 ? 'pl-8 text-slate-600' : 'font-semibold'
+                        }`}
                     >
                       {line.accountCode} {line.accountName}
                     </td>

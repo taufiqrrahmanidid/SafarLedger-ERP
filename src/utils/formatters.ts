@@ -17,6 +17,21 @@ export function formatShortDate(dateStr: string): string {
   }).format(parsed);
 }
 
+export function formatHijriDate(dateInput?: Date | string): string {
+  const target = dateInput ? new Date(dateInput) : new Date();
+  if (Number.isNaN(target.getTime())) return '';
+  try {
+    const formatted = new Intl.DateTimeFormat('id-ID-u-ca-islamic-umalqura', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    }).format(target);
+    return formatted.includes('H') ? formatted : `${formatted} H`;
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Kemenag & Saudi Immigration rule: passport must have >= 6 months validity
  * from the kloter departure date.

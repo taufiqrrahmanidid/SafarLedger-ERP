@@ -10,6 +10,7 @@ import {
   TravelPackage,
 } from '../../types/erp';
 import { formatIDR } from '../../utils/formatters';
+import { resolvePackageImage } from '../../utils/packageImages';
 
 interface BookingsViewProps {
   tenant: Tenant;
@@ -68,7 +69,7 @@ export const BookingsView: React.FC<BookingsViewProps> = ({
     mahramGroup: '',
     agentId: '',
     passportNo: '',
-    passportExpiry: '2029-06-15',
+    passportExpiry: '',
   });
 
   const [pkgForm, setPkgForm] = useState({
@@ -88,7 +89,7 @@ export const BookingsView: React.FC<BookingsViewProps> = ({
   const selectedPackage = packages.find((p) => p.id === selectedDeparture?.packageId);
 
   const estimatedPrice = useMemo(() => {
-    if (!selectedPackage) return 28500000;
+    if (!selectedPackage) return 0;
     if (form.roomType === 'DOUBLE') return selectedPackage.priceDouble;
     if (form.roomType === 'TRIPLE') return selectedPackage.priceTriple;
     return selectedPackage.priceQuad;
@@ -177,22 +178,20 @@ export const BookingsView: React.FC<BookingsViewProps> = ({
           <button
             type="button"
             onClick={() => setSubView('manifest')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap ${
-              subView === 'manifest'
-                ? 'bg-white text-slate-900 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap ${subView === 'manifest'
+              ? 'bg-white text-slate-900 shadow-2xs'
+              : 'text-slate-600 hover:text-slate-900'
+              }`}
           >
             Manifes &amp; Rooming List ({bookings.length})
           </button>
           <button
             type="button"
             onClick={() => setSubView('packages')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap ${
-              subView === 'packages'
-                ? 'bg-white text-slate-900 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors duration-150 whitespace-nowrap ${subView === 'packages'
+              ? 'bg-white text-slate-900 shadow-2xs'
+              : 'text-slate-600 hover:text-slate-900'
+              }`}
           >
             Katalog Paket &amp; HPP ({packages.length})
           </button>
@@ -653,27 +652,16 @@ export const BookingsView: React.FC<BookingsViewProps> = ({
               return (
                 <div
                   key={p.id}
-                  className="bg-white border border-slate-200/80 rounded-xl overflow-hidden shadow-[0_1px_3px_rgba(15,23,42,0.04)] flex flex-col justify-between"
+                  className="bg-white border border-slate-200/80 rounded-2xl overflow-hidden shadow-[0_1px_3px_rgba(15,23,42,0.04)] hover:shadow-md transition-all duration-200 flex flex-col justify-between"
                 >
                   <div>
                     <div className="aspect-[4/3] bg-slate-100 overflow-hidden">
-                      {p.imageUrl ? (
-                        <img
-                          src={p.imageUrl}
-                          alt={p.name}
-                          referrerPolicy="no-referrer"
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <div
-                          className="w-full h-full flex items-center justify-center text-white font-display font-bold text-base"
-                          style={{
-                            background: `linear-gradient(135deg, ${tenant.primaryColor} 0%, #0F172A 100%)`,
-                          }}
-                        >
-                          {p.code}
-                        </div>
-                      )}
+                      <img
+                        src={resolvePackageImage(p.imageUrl, p.category)}
+                        alt={p.name}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover transition-transform duration-300 hover:scale-[1.03]"
+                      />
                     </div>
                     <div className="p-4 space-y-2.5">
                       <div className="text-[11px] font-mono-code text-slate-500">

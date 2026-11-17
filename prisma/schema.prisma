@@ -1,0 +1,239 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id                String   @id @default(uuid())
+  code              String
+  name              String
+  subdomain         String   @unique
+  customDomain      String?  @unique
+  ppiu              String
+  pihk              String   @default("Belum Terdaftar")
+  plan              String   @default("PRO") // LITE | PRO | ENTERPRISE
+  maxJamaahPerMonth Int      @default(350)
+  maxUsers          Int      @default(15)
+  primaryColor      String   @default("#0F4C3A")
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+
+  users       User[]
+  packages    TravelPackage[]
+  departures  Departure[]
+  bookings    Booking[]
+  payments    PaymentRecord[]
+  coa         ChartOfAccount[]
+  journals    JournalEntry[]
+  dmsRecords  DmsRecord[]
+  inventory   InventoryItem[]
+  agents      Agent[]
+  incidents   IsoIncident[]
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         String   // SUPER_ADMIN | OWNER | OPS | FINANCE | AGENT
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  @@index([tenantId])
+}
+
+model TravelPackage {
+  id           String      @id @default(uuid())
+  tenantId     String
+  tenant       Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code         String
+  name         String
+  category     String
+  durationDays Int
+  priceQuad    Decimal     @db.Decimal(15, 2)
+  priceTriple  Decimal     @db.Decimal(15, 2)
+  priceDouble  Decimal     @db.Decimal(15, 2)
+  hppEstimate  Decimal     @db.Decimal(15, 2)
+  hotelMakkah  String
+  hotelMadinah String
+  imageUrl     String?
+  departures   Departure[]
+
+  @@unique([tenantId, code])
+}
+
+model Departure {
+  id            String        @id @default(uuid())
+  tenantId      String
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  packageId     String
+  package       TravelPackage @relation(fields: [packageId], references: [id])
+  kloterCode    String
+  packageName   String
+  airline       String
+  departureDate DateTime
+  returnDate    DateTime
+  totalSeats    Int
+  filledSeats   Int           @default(0)
+  estHppPerSeat Decimal       @db.Decimal(15, 2)
+  status        String        @default("OPEN") // OPEN | FULL | DEPARTED | COMPLETED
+  bookings      Booking[]
+
+  @@unique([tenantId, kloterCode])
+}
+
+model Agent {
+  id                   String    @id @default(uuid())
+  tenantId             String
+  tenant               Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code                 String
+  name                 String
+  phone                String
+  parentAgentId        String?
+  directCommissionRate Decimal   @db.Decimal(15, 2)
+  overridingRatePct    Int       @default(10)
+  jamaahCount          Int       @default(0)
+  commissionEarned     Decimal   @default(0) @db.Decimal(15, 2)
+  commissionPaid       Decimal   @default(0) @db.Decimal(15, 2)
+  bookings             Booking[]
+
+  @@unique([tenantId, code])
+}
+
+model Booking {
+  id            String          @id @default(uuid())
+  tenantId      String
+  tenant        Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bookingNo     String
+  departureId   String
+  departure     Departure       @relation(fields: [departureId], references: [id])
+  jamaahName    String
+  nikEncrypted  String          // Wajib AES-256-GCM
+  phone         String
+  gender        String
+  roomType      String
+  roomNumber    String          @default("TBD")
+  mahramGroup   String          @default("")
+  agentId       String?
+  agent         Agent?          @relation(fields: [agentId], references: [id])
+  totalAmount   Decimal         @db.Decimal(15, 2)
+  paidAmount    Decimal         @default(0) @db.Decimal(15, 2)
+  status        String          @default("PENDING_DP")
+  kitDispatched Boolean         @default(false)
+  createdAt     DateTime        @default(now())
+  payments      PaymentRecord[]
+  dmsRecord     DmsRecord?
+
+  @@unique([tenantId, bookingNo])
+  @@index([tenantId, departureId])
+}
+
+model PaymentRecord {
+  id         String   @id @default(uuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bookingId  String
+  booking    Booking  @relation(fields: [bookingId], references: [id])
+  receiptNo  String
+  method     String
+  amount     Decimal  @db.Decimal(15, 2)
+  qrHash     String
+  externalId String?  @unique // Untuk Idempotency Webhook Xendit/Midtrans
+  paidAt     DateTime @default(now())
+
+  @@unique([tenantId, receiptNo])
+}
+
+model ChartOfAccount {
+  id             String  @id @default(uuid())
+  tenantId       String
+  tenant         Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code           String
+  name           String
+  type           String  // ASSET | LIABILITY | EQUITY | REVENUE | EXPENSE
+  normalBalance  String  // DEBIT | CREDIT
+  openingBalance Decimal @default(0) @db.Decimal(15, 2)
+
+  @@unique([tenantId, code])
+}
+
+model JournalEntry {
+  id          String        @id @default(uuid())
+  tenantId    String
+  tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entryNo     String
+  entryDate   DateTime      @default(now())
+  refType     String        // PAYMENT | DEPARTURE_RECOGNITION | COMMISSION | EXPENSE
+  kloterCode  String?
+  description String
+  lines       JournalLine[]
+
+  @@unique([tenantId, entryNo])
+  @@index([tenantId, entryDate])
+}
+
+model JournalLine {
+  id             String       @id @default(uuid())
+  journalEntryId String
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  accountCode    String
+  accountName    String
+  debit          Decimal      @default(0) @db.Decimal(15, 2)
+  credit         Decimal      @default(0) @db.Decimal(15, 2)
+}
+
+model DmsRecord {
+  id                String    @id @default(uuid())
+  tenantId          String
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  bookingId         String    @unique
+  booking           Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  ktpStatus         String    @default("MISSING")
+  kkStatus          String    @default("MISSING")
+  passportNoEnc     String?
+  passportExpiry    DateTime?
+  passportStatus    String    @default("MISSING")
+  meningitisStatus  String    @default("MISSING")
+  mahramDocStatus   String    @default("VALID")
+  s3PassportKey     String?
+  s3KtpKey          String?
+  s3KkKey           String?
+  s3MeningitisKey   String?
+}
+
+model InventoryItem {
+  id        String  @id @default(uuid())
+  tenantId  String
+  tenant    Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sku       String
+  name      String
+  warehouse String
+  qty       Int     @default(0)
+  minStock  Int     @default(20)
+  avgCost   Decimal @db.Decimal(15, 2)
+  isBundle  Boolean @default(false)
+
+  @@unique([tenantId, sku])
+}
+
+model IsoIncident {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ticket          String
+  kloterCode      String
+  category        String
+  description     String
+  slaDeadline     DateTime
+  status          String   @default("OPEN")
+  resolutionNotes String?
+
+  @@unique([tenantId, ticket])
+}

@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import { Printer, Receipt, Search } from 'lucide-react';
 import { Booking, PaymentMethod, PaymentRecord, Tenant } from '../../types/erp';
-import { buildQrGrid, formatIDR, formatShortDate } from '../../utils/formatters';
+import { buildQrGrid, formatHijriDate, formatIDR, formatShortDate } from '../../utils/formatters';
+import { RubElHizbMark } from '../IslamicOrnament';
 
 interface PaymentsViewProps {
   tenant: Tenant;
@@ -11,7 +12,7 @@ interface PaymentsViewProps {
     bookingId: string;
     amount: number;
     method: PaymentMethod;
-  }) => PaymentRecord | null;
+  }) => Promise<PaymentRecord | null> | PaymentRecord | null;
 }
 
 const METHOD_LABELS: Record<PaymentMethod, string> = {
@@ -40,6 +41,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   const [method, setMethod] = useState<PaymentMethod>('BSI_VA');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedReceiptId, setSelectedReceiptId] = useState<string>(payments[0]?.id || '');
+  const [submitting, setSubmitting] = useState(false);
 
   const activeBookingId = unpaidBookings.some((b) => b.id === selectedBookingId)
     ? selectedBookingId
@@ -69,16 +71,21 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
     );
   }, [payments, searchQuery]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeBookingId || amount <= 0) return;
-    const created = onRecordPayment({
-      bookingId: activeBookingId,
-      amount,
-      method,
-    });
-    if (created) {
-      setSelectedReceiptId(created.id);
+    if (!activeBookingId || amount <= 0 || submitting) return;
+    setSubmitting(true);
+    try {
+      const created = await onRecordPayment({
+        bookingId: activeBookingId,
+        amount,
+        method,
+      });
+      if (created) {
+        setSelectedReceiptId(created.id);
+      }
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -95,7 +102,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Form Terima Pembayaran */}
-        <div className="no-print bg-white border border-slate-200/80 rounded-xl p-5 space-y-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)] h-fit">
+        <div className="no-print bg-white border border-slate-200/80 rounded-2xl p-5 space-y-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)] h-fit">
           <div className="pb-3 border-b border-slate-100">
             <h2 className="text-sm font-semibold text-slate-900 font-display">
               Terima Pembayaran / Angsuran
@@ -189,10 +196,11 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
 
               <button
                 type="submit"
-                className="w-full h-10 text-xs font-semibold text-white rounded-lg shadow-xs transition-opacity duration-150 hover:opacity-95"
+                disabled={submitting}
+                className="w-full h-10 text-xs font-semibold text-white rounded-lg shadow-xs transition-opacity duration-150 hover:opacity-95 disabled:opacity-60"
                 style={{ backgroundColor: tenant.primaryColor }}
               >
-                Verifikasi &amp; Auto-Journal SAK ETAP
+                {submitting ? 'Memproses Pembayaran...' : 'Verifikasi & Auto-Journal SAK ETAP'}
               </button>
             </form>
           )}
@@ -201,17 +209,18 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         {/* Riwayat Pembayaran & Preview Kuitansi Resmi */}
         <div className="lg:col-span-2 space-y-5">
           {selectedReceipt && (
-            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-xs">
-              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 pb-4 border-b border-slate-100">
+            <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-[0_2px_8px_rgba(15,23,42,0.04)]">
+              <div className="islamic-girih-light px-6 py-5 border-b border-amber-500/20 flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                 <div className="space-y-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                    Kuitansi Pembayaran Resmi
+                  <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-emerald-900">
+                    <RubElHizbMark className="w-3.5 h-3.5 text-amber-600" />
+                    <span>Kuitansi Pembayaran Syariah Resmi</span>
                   </div>
                   <div className="text-base font-bold text-slate-900 font-display">
                     {tenant.name}
                   </div>
                   <div className="text-xs text-slate-500 tabular">
-                    Izin PPIU: {tenant.ppiu} · Izin PIHK: {tenant.pihk}
+                    Izin PPIU {tenant.ppiu} · Izin PIHK {tenant.pihk}
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -219,12 +228,15 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                     <div className="font-mono-code font-semibold text-slate-900">
                       {selectedReceipt.receiptNo}
                     </div>
-                    <div className="text-slate-500">{formatShortDate(selectedReceipt.date)}</div>
+                    <div className="text-slate-600">{formatShortDate(selectedReceipt.date)}</div>
+                    <div className="text-[11px] text-amber-800/90">
+                      {formatHijriDate(selectedReceipt.date)}
+                    </div>
                   </div>
                   <button
                     type="button"
                     onClick={() => window.print()}
-                    className="no-print h-8 px-3 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5 whitespace-nowrap"
+                    className="no-print h-9 px-3.5 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 hover:bg-slate-50 inline-flex items-center gap-1.5 whitespace-nowrap shadow-2xs"
                   >
                     <Printer className="w-3.5 h-3.5" />
                     Cetak
@@ -232,67 +244,69 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex flex-col sm:flex-row justify-between gap-5 items-start sm:items-center">
-                <div className="space-y-2 text-xs flex-1">
-                  <div className="grid grid-cols-3 gap-2">
-                    <span className="text-slate-500">Diterima Dari</span>
-                    <span className="col-span-2 font-semibold text-slate-900">
-                      {selectedReceipt.jamaahName}
-                    </span>
+              <div className="p-6 space-y-4">
+                <div className="flex flex-col sm:flex-row justify-between gap-5 items-start sm:items-center">
+                  <div className="space-y-2 text-xs flex-1">
+                    <div className="grid grid-cols-3 gap-2">
+                      <span className="text-slate-500">Diterima Dari</span>
+                      <span className="col-span-2 font-semibold text-slate-900">
+                        {selectedReceipt.jamaahName}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <span className="text-slate-500">Nomor Booking</span>
+                      <span className="col-span-2 font-mono-code text-slate-800">
+                        {selectedReceipt.bookingNo}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <span className="text-slate-500">Metode Bayar</span>
+                      <span className="col-span-2 text-slate-800">
+                        {METHOD_LABELS[selectedReceipt.method]}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100">
+                      <span className="text-slate-500 font-medium">Nominal Diterima</span>
+                      <span className="col-span-2 text-lg font-bold tabular text-slate-900 font-display">
+                        {formatIDR(selectedReceipt.amount)}
+                      </span>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <span className="text-slate-500">Nomor Booking</span>
-                    <span className="col-span-2 font-mono-code text-slate-800">
-                      {selectedReceipt.bookingNo}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <span className="text-slate-500">Metode Bayar</span>
-                    <span className="col-span-2 text-slate-800">
-                      {METHOD_LABELS[selectedReceipt.method]}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100">
-                    <span className="text-slate-500 font-medium">Nominal Diterima</span>
-                    <span className="col-span-2 text-lg font-bold tabular text-slate-900 font-display">
-                      {formatIDR(selectedReceipt.amount)}
-                    </span>
-                  </div>
-                </div>
 
-                <div className="flex flex-col items-center p-3 border border-slate-200 rounded-lg bg-slate-50 shrink-0">
-                  <svg
-                    width="64"
-                    height="64"
-                    viewBox="0 0 9 9"
-                    shapeRendering="crispEdges"
-                    role="img"
-                    aria-label={`QR Verifikasi ${selectedReceipt.receiptNo}`}
-                  >
-                    <rect width="9" height="9" fill="#FFFFFF" />
-                    {qrCells.map((filled, idx) =>
-                      filled ? (
-                        <rect
-                          key={idx}
-                          x={idx % 9}
-                          y={Math.floor(idx / 9)}
-                          width="1"
-                          height="1"
-                          fill="#0F172A"
-                        />
-                      ) : null
-                    )}
-                  </svg>
-                  <span className="text-[10px] font-mono-code text-slate-500 mt-1.5">
-                    {selectedReceipt.qrHash}
-                  </span>
+                  <div className="flex flex-col items-center p-3 border border-amber-500/25 rounded-xl bg-slate-50/70 shrink-0">
+                    <svg
+                      width="64"
+                      height="64"
+                      viewBox="0 0 9 9"
+                      shapeRendering="crispEdges"
+                      role="img"
+                      aria-label={`QR Verifikasi ${selectedReceipt.receiptNo}`}
+                    >
+                      <rect width="9" height="9" fill="#FFFFFF" />
+                      {qrCells.map((filled, idx) =>
+                        filled ? (
+                          <rect
+                            key={idx}
+                            x={idx % 9}
+                            y={Math.floor(idx / 9)}
+                            width="1"
+                            height="1"
+                            fill="#0B3B2D"
+                          />
+                        ) : null
+                      )}
+                    </svg>
+                    <span className="text-[10px] font-mono-code text-slate-500 mt-1.5">
+                      {selectedReceipt.qrHash}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
           )}
 
           {/* Riwayat Kuitansi Table */}
-          <div className="no-print bg-white border border-slate-200/80 rounded-xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+          <div className="no-print bg-white border border-slate-200/80 rounded-2xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
             <div className="px-5 py-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
               <div className="flex items-center gap-2">
                 <Receipt className="w-4 h-4 text-slate-500" />
@@ -328,9 +342,8 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                   {filteredPayments.map((p) => (
                     <tr
                       key={p.id}
-                      className={`hover:bg-slate-50/70 transition-colors ${
-                        selectedReceipt?.id === p.id ? 'bg-slate-50' : ''
-                      }`}
+                      className={`hover:bg-slate-50/70 transition-colors ${selectedReceipt?.id === p.id ? 'bg-slate-50' : ''
+                        }`}
                     >
                       <td className="py-3 px-4 font-mono-code font-semibold text-slate-900 whitespace-nowrap">
                         {p.receiptNo}
